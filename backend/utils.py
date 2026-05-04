@@ -5,133 +5,91 @@ import json
 import re
 from dotenv import load_dotenv
 
-# 1. Load environment variables
+# Load environment variables
 load_dotenv()
 
-api_key = os.getenv("GEMINI_API_KEY")
-if not api_key:
-    print("WARNING: GEMINI_API_KEY not found in .env file!")
-
-genai.configure(api_key=api_key)
+# Configure Gemini
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 def extract_text_from_pdf(pdf_path):
-    """
-    Extracts all text from a PDF file.
-    """
+    """Extracts text from PDF."""
     text = ""
     try:
-        if not os.path.exists(pdf_path):
-            return "File not found."
-            
         with open(pdf_path, 'rb') as file:
             reader = PyPDF2.PdfReader(file)
             for page in reader.pages:
                 page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
+                if page_text: text += page_text + "\n"
         return text.strip()
     except Exception as e:
-        print(f"Error extracting PDF: {str(e)}")
+        print(f"Error extracting PDF: {e}")
         return ""
 
 def clean_json_response(raw_text):
-    """
-    Helper function to remove markdown code blocks (```json ... ```) 
-    that Gemini often includes in its response.
-    """
-    # Remove markdown formatting if present
+    """Cleans Gemini markdown and parses JSON."""
     clean_text = re.sub(r'```json|```', '', raw_text).strip()
     try:
         return json.loads(clean_text)
-    except Exception as e:
-        print(f"JSON Parsing Error: {e}")
-        # Return a fallback object so the app doesn't crash
-        return {"error": "Failed to parse AI response"}
+    except:
+        # Fallback if AI output is messy
+        return {"matchingSkills": [], "missingSkills": [], "contextualGaps": ["Analysis error"]}
 
-def analyze_placement(resume_text, jd_text):
+def analyze_placement(resume_text, jd_text, local_data):
     """
-    Compares Resume text with Job Description text using Gemini.
-    """
-    prompt = f"""
-    You are an expert ATS (Applicant Tracking System) and Career Coach. 
-    Compare the following Resume with the Job Description.
-
-    RESUME:
-    {resume_text}
-
-    JOB DESCRIPTION:
-    {jd_text}
-
-    Task: Perform a deep gap analysis.
-    Return ONLY a JSON object with exactly these keys:
-    - matchingSkills: [list of strings]
-    - missingSkills: [list of strings]
-    - contextualGaps: [list of strings explaining why the candidate might struggle]
-    """
-
-    try:
-        response = model.generate_content(prompt)
-        return clean_json_response(response.text)
-    except Exception as e:
-        print(f"Gemini Analysis Error: {e}")
-        return {
-            "matchingSkills": [],
-            "missingSkills": ["Error connecting to AI"],
-            "contextualGaps": [str(e)]
-        }
-
-def generate_sprint(gap_report):
-    """
-    Creates a 7-day learning roadmap based on the gap report.
+    Stage 3: AI Interpretation.
+    Uses the local math results to provide a reasoned analysis.
     """
     prompt = f"""
-    Based on the following skill gaps identified between a candidate and a job:
-    {json.dumps(gap_report)}
+    You are an ATS Expert. I have already performed a local NLP analysis:
+    - Math Match Score: {local_data['score']}%
+    - Locally Detected Skills: {local_data['found_skills']}
+    - Statistical JD Keywords: {local_data['keywords']}
+    - Inferred Gaps: {local_data['inferred']}
 
-    Create a 7-day intensive learning sprint to bridge these gaps.
-    Return ONLY a JSON array of 7 objects. Each object must have:
-    - day: (integer 1 to 7)
-    - title: (short string goal for the day)
-    - tasks: (list of 2 specific actionable study tasks or projects)
-    """
+    RESUME TEXT: {resume_text}
+    JD TEXT: {jd_text}
 
-    try:
-        response = model.generate_content(prompt)
-        return clean_json_response(response.text)
-    except Exception as e:
-        print(f"Gemini Sprint Error: {e}")
-        return [] # Return empty list as fallback
-def rewrite_resume_star(resume_text, jd_text):
-    """
-    Takes resume and JD, identifies experiences, and rewrites them in STAR format.
-    """
-    prompt = f"""
-    You are a professional Resume Writer. 
-    Using the Resume and Job Description below, identify the professional experience sections.
-    
-    RESUME: {resume_text}
-    JD: {jd_text}
-    
-    TASK:
-    Rewrite the key achievement bullet points for each role using the STAR method (Situation, Task, Action, Result).
-    - Focus on integrating keywords from the Job Description.
-    - Ensure each point is impactful and metrics-driven where possible.
-    
-    RETURN ONLY A JSON OBJECT with this structure:
+    Based on the Math Score of {local_data['score']}%, explain the specific gaps.
+    Return ONLY a JSON object:
     {{
-      "roles": [
-        {{
-          "title": "Job Title/Company Name",
-          "rewrittenPoints": ["STAR point 1", "STAR point 2"]
-        }}
-      ]
+      "matchingSkills": [list],
+      "missingSkills": [list],
+      "contextualGaps": [list of brief explanations]
     }}
     """
-    try:
-        response = model.generate_content(prompt)
-        # We reuse the cleaning function we wrote earlier
-        return clean_json_response(response.text)
-    except Exception as e:
-        print(f"Rewrite Error: {e}")
-        return {"roles": []}
+    response = model.generate_content(prompt)
+    return clean_json_response(response.text)
+
+def generate_sprint(gap_report):
+    """Generates 7-day learning roadmap."""
+    prompt = f"Based on these gaps: {gap_report}, generate a 7-day intensive learning sprint in JSON format (list of 7 objects with day, title, tasks)."
+    response = model.generate_content(prompt)
+    return clean_json_response(response.text)
+
+def rewrite_resume_star(resume_text, jd_text):
+    """STAR Method Rewriter."""
+    prompt = f"Rewrite achievements from this resume: {resume_text} to match this JD: {jd_text} using STAR method. Return JSON: {{ 'roles': [ {{ 'title': '', 'rewrittenPoints': [] }} ] }}"
+    response = model.generate_content(prompt)
+    return clean_json_response(response.text)
+
+# --- NEW: INTERVIEW CHAT LOGIC ---
+
+def get_interview_response(chat_history, missing_skills, jd_text):
+    """
+    Acts as a technical interviewer focusing on missing skills.
+    """
+    prompt = f"""
+    You are a Technical Interviewer for this role: {jd_text}.
+    The candidate is weak in: {missing_skills}.
+    
+    Current Chat History: {chat_history}
+    
+    TASK: 
+    1. Ask ONE sharp technical question. 
+    2. If they answer correctly, move to the next topic. 
+    3. If they finish 3 questions, give a 'Readiness Score' out of 100.
+    Keep responses brief and professional.
+    """
+    response = model.generate_content(prompt)
+    return response.text
